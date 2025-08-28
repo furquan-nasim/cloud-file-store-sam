@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "Cloud File Store (Day 1) \u2013 S3 + DynamoDB + Lambda + API (no auth\
+  \ yet)"
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        PRESIGN_TTL_SECONDS: 900
+        BUCKET_NAME:
+          Ref: FilesBucket
+        FILES_TABLE:
+          Ref: FilesTable
+        HISTORY_TABLE:
+          Ref: DownloadHistoryTable
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+Resources:
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName:
+        Ref: StageName
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowMethods: '''GET,POST,DELETE,OPTIONS'''
+        AllowHeaders: '''Content-Type,Authorization'''
+        AllowOrigin: '''*'''
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+        - Id: NonCurrentToIA
+          Status: Enabled
+          NoncurrentVersionTransitions:
+          - StorageClass: STANDARD_IA
+            TransitionInDays: 30
+          NoncurrentVersionExpirationInDays: 180
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+  FilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: pk
+        AttributeType: S
+      - AttributeName: sk
+        AttributeType: S
+      - AttributeName: gsi1pk
+        AttributeType: S
+      - AttributeName: gsi1sk
+        AttributeType: S
+      KeySchema:
+      - AttributeName: pk
+        KeyType: HASH
+      - AttributeName: sk
+        KeyType: RANGE
+      GlobalSecondaryIndexes:
+      - IndexName: gsi1
+        KeySchema:
+        - AttributeName: gsi1pk
+          KeyType: HASH
+        - AttributeName: gsi1sk
+          KeyType: RANGE
+        Projection:
+          ProjectionType: ALL
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+  DownloadHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: pk
+        AttributeType: S
+      - AttributeName: sk
+        AttributeType: S
+      KeySchema:
+      - AttributeName: pk
+        KeyType: HASH
+      - AttributeName: sk
+        KeyType: RANGE
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+  PresignUploadFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: PresignUploadFn
+      Handler: app.handler
+      Policies:
+      - S3WritePolicy:
+          BucketName:
+            Ref: FilesBucket
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: FilesTable
+      Events:
+        PostUpload:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: Api
+            Path: /files/presign-upload
+            Method: post
+    Metadata:
+      SamResourceId: PresignUploadFn
+  PresignDownloadFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: PresignDownloadFn
+      Handler: app.handler
+      Policies:
+      - S3ReadPolicy:
+          BucketName:
+            Ref: FilesBucket
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: DownloadHistoryTable
+      Events:
+        GetDownload:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: Api
+            Path: /files/presign-download
+            Method: get
+    Metadata:
+      SamResourceId: PresignDownloadFn
+  ListFilesFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ListFilesFn
+      Handler: app.handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: FilesTable
+      Events:
+        GetList:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: Api
+            Path: /files/list
+            Method: get
+    Metadata:
+      SamResourceId: ListFilesFn
+Outputs:
+  ApiUrl:
+    Description: API base URL
+    Value:
+      Fn::Sub: https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+  BucketName:
+    Description: S3 bucket used for files
+    Value:
+      Ref: FilesBucket
+  FilesTableName:
+    Description: Files DynamoDB table
+    Value:
+      Ref: FilesTable
+  HistoryTableName:
+    Description: Download history table
+    Value:
+      Ref: DownloadHistoryTable

@@ -1,0 +1,11 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "cloud-file-store-sam"
+resolve_s3 = true
+s3_prefix = "cloud-file-store-sam"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "StageName=\"prod\""
+image_repositories = []
