@@ -131,5 +131,3 @@ File content: hello from SAM
 ---
 
 > 📌 Day 1 takeaway: Core infrastructure is live, roundtrip upload/download confirmed, environment ready for Day 2 (auth + metadata + UI).
-
-

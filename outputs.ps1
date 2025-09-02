@@ -3,7 +3,7 @@
     Fetch CloudFormation stack outputs for the SAM project.
 
 .DESCRIPTION
-    Helper to quickly print the key outputs (ApiUrl, S3 bucket, DynamoDB tables)
+    Helper to quickly print the key outputs (ApiUrl, S3 bucket, DynamoDB tables, Cognito)
     from the deployed CloudFormation stack for this project.
 
 .NOTES
@@ -47,6 +47,8 @@ try {
         [pscustomobject]@{ Key="BucketName";       Value=$map['BucketName'] }
         [pscustomobject]@{ Key="FilesTableName";   Value=$map['FilesTableName'] }
         [pscustomobject]@{ Key="HistoryTableName"; Value=$map['HistoryTableName'] }
+        [pscustomobject]@{ Key="UserPoolId";       Value=$map['UserPoolId'] }
+        [pscustomobject]@{ Key="UserPoolClientId"; Value=$map['UserPoolClientId'] }
     )
     $rows | Format-Table -AutoSize
 }

@@ -1,170 +1,227 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Cloud File Store (Day 1) – S3 + DynamoDB + Lambda + API (no auth yet)
+Description: "Cloud-based file storage (Day 1 + Day 2: Cognito auth & role groups)"
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    Description: API stage name
 
 Globals:
   Function:
     Runtime: python3.13
     Timeout: 10
     MemorySize: 256
+    Architectures: [x86_64]
     Tracing: Active
     Environment:
       Variables:
-        PRESIGN_TTL_SECONDS: 900
         BUCKET_NAME: !Ref FilesBucket
-        FILES_TABLE: !Ref FilesTable
-        HISTORY_TABLE: !Ref DownloadHistoryTable
-
-Parameters:
-  StageName:
-    Type: String
-    Default: prod
+        PRESIGN_TTL_SECONDS: 900
 
 Resources:
+
+  ########################################
+  # API Gateway (now secured by Cognito)
+  ########################################
   Api:
     Type: AWS::Serverless::Api
     Properties:
       StageName: !Ref StageName
       EndpointConfiguration: REGIONAL
+      TracingEnabled: true
       Cors:
         AllowMethods: "'GET,POST,DELETE,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization'"
         AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+            Identity:
+              Header: Authorization
 
+  ########################################
+  # S3 bucket for file storage
+  ########################################
   FilesBucket:
     Type: AWS::S3::Bucket
     Properties:
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      LifecycleConfiguration:
-        Rules:
-          - Id: NonCurrentToIA
-            Status: Enabled
-            NoncurrentVersionTransitions:
-              - StorageClass: STANDARD_IA
-                TransitionInDays: 30
-            NoncurrentVersionExpirationInDays: 180
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
 
+  ########################################
+  # DynamoDB tables (metadata + history)
+  ########################################
   FilesTable:
     Type: AWS::DynamoDB::Table
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: pk
-          AttributeType: S
-        - AttributeName: sk
-          AttributeType: S
-        - AttributeName: gsi1pk
-          AttributeType: S
-        - AttributeName: gsi1sk
+        - AttributeName: fileId
           AttributeType: S
       KeySchema:
-        - AttributeName: pk
+        - AttributeName: fileId
           KeyType: HASH
-        - AttributeName: sk
-          KeyType: RANGE
-      GlobalSecondaryIndexes:
-        - IndexName: gsi1
-          KeySchema:
-            - AttributeName: gsi1pk
-              KeyType: HASH
-            - AttributeName: gsi1sk
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
 
   DownloadHistoryTable:
     Type: AWS::DynamoDB::Table
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: pk
-          AttributeType: S
-        - AttributeName: sk
+        - AttributeName: downloadId
           AttributeType: S
       KeySchema:
-        - AttributeName: pk
+        - AttributeName: downloadId
           KeyType: HASH
-        - AttributeName: sk
-          KeyType: RANGE
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
 
+  ########################################
+  # Cognito (User Pool + Client + Groups)
+  ########################################
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: CloudFileStoreUserPool
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: cloud-file-store-client
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders: [COGNITO]
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      UserPoolId: !Ref UserPool
+      Description: Admins can upload/download/delete
+
+  UploaderGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: uploader
+      UserPoolId: !Ref UserPool
+      Description: Upload & download
+
+  ViewerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: viewer
+      UserPoolId: !Ref UserPool
+      Description: Download only
+
+  ########################################
+  # Lambda: presign upload (POST /files/presign-upload)
+  ########################################
   PresignUploadFn:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/presign_upload/
       Handler: app.handler
-      Policies:
-        - S3WritePolicy:
-            BucketName: !Ref FilesBucket
-        - DynamoDBCrudPolicy:
-            TableName: !Ref FilesTable
+      Description: Generate presigned S3 PUT URL
       Events:
-        PostUpload:
+        ApiEvent:
           Type: Api
           Properties:
             RestApiId: !Ref Api
             Path: /files/presign-upload
-            Method: post
+            Method: POST
+      Policies:
+        # S3 object write for this bucket
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
+        # CloudWatch logs
+        - AWSLambdaBasicExecutionRole
 
+  ########################################
+  # Lambda: presign download (GET /files/presign-download)
+  ########################################
   PresignDownloadFn:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/presign_download/
       Handler: app.handler
-      Policies:
-        - S3ReadPolicy:
-            BucketName: !Ref FilesBucket
-        - DynamoDBCrudPolicy:
-            TableName: !Ref DownloadHistoryTable
+      Description: Generate presigned S3 GET URL
       Events:
-        GetDownload:
+        ApiEvent:
           Type: Api
           Properties:
             RestApiId: !Ref Api
             Path: /files/presign-download
-            Method: get
+            Method: GET
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref FilesBucket
+        - AWSLambdaBasicExecutionRole
 
+  ########################################
+  # Lambda: list files (stub for Day 3)
+  ########################################
   ListFilesFn:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/list_files/
       Handler: app.handler
-      Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref FilesTable
+      Description: List files (to be implemented on Day 3)
       Events:
-        GetList:
+        ApiEvent:
           Type: Api
           Properties:
             RestApiId: !Ref Api
             Path: /files/list
-            Method: get
+            Method: GET
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref FilesBucket
+        - AWSLambdaBasicExecutionRole
 
 Outputs:
   ApiUrl:
-    Description: API base URL
+    Description: Base URL for API Gateway stage
     Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
   BucketName:
-    Description: S3 bucket used for files
+    Description: S3 bucket for files
     Value: !Ref FilesBucket
   FilesTableName:
-    Description: Files DynamoDB table
+    Description: DynamoDB table for file metadata
     Value: !Ref FilesTable
   HistoryTableName:
-    Description: Download history table
+    Description: DynamoDB table for download history
     Value: !Ref DownloadHistoryTable
+  UserPoolId:
+    Description: Cognito User Pool Id
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: Cognito App Client Id
+    Value: !Ref UserPoolClient
