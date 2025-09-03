@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: "Cloud-based file storage (Day 1 + Day 2: Cognito auth & role groups)"
+Description: "Cloud-based file storage (Day 1 + Day 2: Cognito auth & role groups, Day 3: list files)"
 
 Parameters:
   StageName:
@@ -23,7 +23,7 @@ Globals:
 Resources:
 
   ########################################
-  # API Gateway (now secured by Cognito)
+  # API Gateway (secured by Cognito)
   ########################################
   Api:
     Type: AWS::Serverless::Api
@@ -158,10 +158,8 @@ Resources:
             Path: /files/presign-upload
             Method: POST
       Policies:
-        # S3 object write for this bucket
         - S3CrudPolicy:
             BucketName: !Ref FilesBucket
-        # CloudWatch logs
         - AWSLambdaBasicExecutionRole
 
   ########################################
@@ -186,14 +184,18 @@ Resources:
         - AWSLambdaBasicExecutionRole
 
   ########################################
-  # Lambda: list files (stub for Day 3)
+  # Lambda: list files (Day 3)
   ########################################
   ListFilesFn:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/list_files/
       Handler: app.handler
-      Description: List files (to be implemented on Day 3)
+      Description: List files in bucket
+      Environment:
+        Variables:
+          FILES_BUCKET: !Ref FilesBucket
+          FILES_TABLE_NAME: !Ref FilesTable
       Events:
         ApiEvent:
           Type: Api
@@ -204,7 +206,10 @@ Resources:
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref FilesBucket
+        - DynamoDBReadPolicy:
+            TableName: !Ref FilesTable
         - AWSLambdaBasicExecutionRole
+
 
 Outputs:
   ApiUrl:
