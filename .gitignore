@@ -11,6 +11,9 @@ __pycache__/
 # AWS SAM build artifacts
 .aws-sam/
 
+# Test artifacts
+apitest.txt
+
 # OS/editor junk
 .DS_Store
 Thumbs.db

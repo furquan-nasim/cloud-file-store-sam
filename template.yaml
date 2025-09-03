@@ -149,7 +149,12 @@ Resources:
     Properties:
       CodeUri: src/presign_upload/
       Handler: app.handler
-      Description: Generate presigned S3 PUT URL
+      Description: Generate presigned S3 PUT URL + save metadata in DynamoDB
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref FilesBucket
+          PRESIGN_TTL_SECONDS: 900
+          FILES_TABLE_NAME: !Ref FilesTable
       Events:
         ApiEvent:
           Type: Api
@@ -158,9 +163,17 @@ Resources:
             Path: /files/presign-upload
             Method: POST
       Policies:
+        # ✅ Allow Lambda to write files to S3
         - S3CrudPolicy:
             BucketName: !Ref FilesBucket
+
+        # ✅ Allow Lambda to write metadata into DynamoDB
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+
+        # ✅ Always include CloudWatch logs
         - AWSLambdaBasicExecutionRole
+
 
   ########################################
   # Lambda: presign download (GET /files/presign-download)
@@ -208,6 +221,30 @@ Resources:
             BucketName: !Ref FilesBucket
         - DynamoDBReadPolicy:
             TableName: !Ref FilesTable
+        - AWSLambdaBasicExecutionRole
+
+  ########################################
+  # Lambda: record download (Day 4)
+  ########################################
+  RecordDownloadFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/record_download/
+      Handler: app.handler
+      Description: Record a file download into DownloadHistoryTable
+      Environment:
+        Variables:
+          HISTORY_TABLE_NAME: !Ref DownloadHistoryTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /files/record-download
+            Method: POST
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DownloadHistoryTable
         - AWSLambdaBasicExecutionRole
 
 
