@@ -25,21 +25,21 @@ dynamodb = boto3.resource("dynamodb")
 # ---------------------------------------------------------------------------
 # 2. Environment variables from template.yaml
 # ---------------------------------------------------------------------------
-BUCKET = os.environ["BUCKET_NAME"]              # S3 bucket name
+BUCKET = os.environ["BUCKET_NAME"]                # S3 bucket name
 TTL = int(os.environ.get("PRESIGN_TTL_SECONDS", "900"))  # URL expiry (seconds)
-FILES_TABLE = os.environ["FILES_TABLE_NAME"]    # DynamoDB table name for file metadata
+FILES_TABLE = os.environ["FILES_TABLE_NAME"]      # DynamoDB table name
 
 files_table = dynamodb.Table(FILES_TABLE)
 
 # ---------------------------------------------------------------------------
-# 3. Helper: format consistent API Gateway responses
+# 3. Helper: consistent API Gateway response format
 # ---------------------------------------------------------------------------
 def _resp(status, body):
     return {
         "statusCode": status,
         "headers": {
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",  # CORS allow all
+            "Access-Control-Allow-Origin": "*",  # Allow all (for frontend CORS)
             "Access-Control-Allow-Headers": "Content-Type,Authorization",
             "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
         },
@@ -51,6 +51,10 @@ def _resp(status, body):
 # ---------------------------------------------------------------------------
 def handler(event, context):
     try:
+        # 🔹 Extract user info from Cognito authorizer claims
+        claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+        user_email = claims.get("email") or claims.get("cognito:username", "unknown-user")
+
         # 🔹 Parse request body
         body = event.get("body", "{}")
         if isinstance(body, str):
@@ -64,20 +68,21 @@ def handler(event, context):
         file_id = str(uuid.uuid4())
         key = f"uploads/{file_id}/{filename}"
 
-        # 🔹 Generate presigned PUT URL (valid for TTL seconds)
+        # 🔹 Generate presigned PUT URL
         url = s3.generate_presigned_url(
             "put_object",
             Params={"Bucket": BUCKET, "Key": key},
             ExpiresIn=TTL,
         )
 
-        # 🔹 Save metadata into DynamoDB (for listing later)
+        # 🔹 Save metadata into DynamoDB
         files_table.put_item(
             Item={
-                "fileId": file_id,             # UUID for file
-                "s3Key": key,                  # Path inside S3
-                "filename": filename,          # Original file name
+                "fileId": file_id,                    # UUID for file
+                "s3Key": key,                         # Path inside S3
+                "filename": filename,                 # Original filename
                 "uploadedAt": datetime.utcnow().isoformat(),  # Upload timestamp
+                "uploadedBy": user_email,             # From Cognito claims
             }
         )
 
@@ -89,9 +94,10 @@ def handler(event, context):
                 "key": key,
                 "url": url,
                 "expiresIn": TTL,
+                "uploadedBy": user_email,
             },
         )
 
     except Exception as e:
-        print("Error in presign_upload:", str(e))
+        print("❌ Error in presign_upload:", str(e))
         return _resp(500, {"error": str(e)})

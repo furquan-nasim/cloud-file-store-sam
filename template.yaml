@@ -184,6 +184,11 @@ Resources:
       CodeUri: src/presign_download/
       Handler: app.handler
       Description: Generate presigned S3 GET URL
+      Environment:
+        Variables:
+          FILES_BUCKET: !Ref FilesBucket
+          FILES_TABLE_NAME: !Ref FilesTable
+          HISTORY_TABLE_NAME: !Ref DownloadHistoryTable
       Events:
         ApiEvent:
           Type: Api
@@ -194,6 +199,10 @@ Resources:
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref FilesBucket
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DownloadHistoryTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref FilesTable
         - AWSLambdaBasicExecutionRole
 
   ########################################
