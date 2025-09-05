@@ -21,6 +21,7 @@ import json
 import uuid
 import urllib.parse
 from datetime import datetime
+from typing import Dict, List, Any
 
 import boto3
 from botocore.config import Config
@@ -47,7 +48,7 @@ HISTORY_TABLE_NAME = os.environ["HISTORY_TABLE_NAME"]
 history_table = dynamodb.Table(HISTORY_TABLE_NAME)
 
 
-def _resp(status: int, body: dict):
+def _resp(status: int, body: dict) -> dict:
     """Consistent JSON + CORS response."""
     return {
         "statusCode": status,
@@ -61,29 +62,39 @@ def _resp(status: int, body: dict):
     }
 
 
-def _get_requester(event) -> str:
+# ----------------------------
+# Shared Cognito helper + RBAC
+# ----------------------------
+def _get_cognito_info_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Try to pull a human-friendly identity from the Cognito JWT.
-    Falls back to 'anonymous' if not found.
+    Safely extract user info from event.requestContext.authorizer.claims
+    Returns a dict: { "username": str, "email": Optional[str], "groups": List[str] }
     """
-    try:
-        claims = (
-            event.get("requestContext", {})
-            .get("authorizer", {})
-            .get("jwt", {})
-            .get("claims", {})
-        )
-        # Prefer email if present; else cognito:username; else sub
-        return claims.get("email") or claims.get("cognito:username") or claims.get("sub") or "anonymous"
-    except Exception:
-        return "anonymous"
+    claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {}) or {}
+    # Prefer email, then cognito:username, then sub
+    username = claims.get("email") or claims.get("cognito:username") or claims.get("sub") or "unknown-user"
+    email = claims.get("email")
+    groups_raw = claims.get("cognito:groups") or claims.get("groups") or ""
+    groups: List[str] = []
+    if isinstance(groups_raw, list):
+        groups = groups_raw
+    elif isinstance(groups_raw, str) and groups_raw:
+        groups = [g.strip() for g in groups_raw.split(",") if g.strip()]
+    return {"username": username, "email": email, "groups": groups}
 
 
-def _get_ip_and_ua(event):
+def _has_any_group(user_groups: List[str], allowed: List[str]) -> bool:
+    if not user_groups:
+        return False
+    user_set = set(g.lower() for g in user_groups)
+    allowed_set = set(g.lower() for g in allowed)
+    return len(user_set.intersection(allowed_set)) > 0
+
+
+def _get_ip_and_ua(event: Dict[str, Any]):
     """Extract client IP and User-Agent from headers if available."""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     ip = headers.get("x-forwarded-for", "")
-    # x-forwarded-for can be a list "client, proxy1, proxy2"
     ip = ip.split(",")[0].strip() if ip else ""
     ua = headers.get("user-agent", "")
     return ip, ua
@@ -93,13 +104,28 @@ def handler(event, context):
     """
     Handler for GET /files/presign-download
     Steps:
-      1) Read/normalize query params.
-      2) (Optional) HEAD-check the object so we can return 404 if missing.
-      3) Generate a presigned GET URL (optionally set response headers).
-      4) Write an audit record to DynamoDB.
+      1) Authenticate + RBAC (viewer/uploader/admin)
+      2) Read/normalize query params.
+      3) (Optional) HEAD-check the object so we can return 404 if missing.
+      4) Generate a presigned GET URL (optionally set response headers).
+      5) Write an audit record to DynamoDB (best-effort).
     """
     try:
-        # --- 1) Read & normalize query params ---
+        # --- 1) Auth + RBAC ---
+        cognito = _get_cognito_info_from_event(event)
+        username = cognito.get("username")
+        email = cognito.get("email")
+        groups = cognito.get("groups", [])
+
+        # If no meaningful identity present, treat as unauthenticated
+        if username == "unknown-user" and not email and not groups:
+            return _resp(401, {"error": "unauthenticated - missing Cognito claims"})
+
+        allowed_groups = ["admin", "uploader", "viewer"]
+        if not _has_any_group(groups, allowed_groups):
+            return _resp(403, {"error": "forbidden - requires viewer/uploader/admin group"})
+
+        # --- 2) Read & normalize query params ---
         params = event.get("queryStringParameters") or {}
         if isinstance(params, str):
             # rare case: URL-encoded string
@@ -110,8 +136,6 @@ def handler(event, context):
             return _resp(400, {"error": "query parameter 'key' is required"})
 
         key = urllib.parse.unquote(raw_key)  # API Gateway often encodes slashes %2F
-
-        # Optional
         version_id = params.get("versionId") or None
         as_attachment = (params.get("asAttachment", "true").lower() == "true")
         download_name = params.get("downloadName") or None
@@ -120,36 +144,34 @@ def handler(event, context):
         if version_id:
             presign_params["VersionId"] = version_id
 
-        # Optional content-disposition for nicer download behavior
         if download_name:
             disposition_type = "attachment" if as_attachment else "inline"
             content_disp = f'{disposition_type}; filename="{download_name}"'
             presign_params["ResponseContentDisposition"] = content_disp
 
-        # --- 2) Optional existence check (HEAD) ---
+        # --- 3) Optional existence check (HEAD) ---
         if CHECK_EXISTS:
             try:
                 head_kwargs = {"Bucket": BUCKET, "Key": key}
                 if version_id:
                     head_kwargs["VersionId"] = version_id
-                s3.head_object(**head_kwargs)  # raises if missing
+                s3.head_object(**head_kwargs)
             except ClientError as ce:
                 code = ce.response.get("Error", {}).get("Code")
                 if code in ("404", "NoSuchKey", "NotFound"):
                     return _resp(404, {"error": "object not found", "key": key})
-                # other S3 errors bubble up
                 raise
 
-        # --- 3) Generate presigned GET URL ---
+        # --- 4) Generate presigned GET URL ---
         url = s3.generate_presigned_url(
             "get_object",
             Params=presign_params,
             ExpiresIn=TTL,
         )
 
-        # --- 4) Audit log to DynamoDB ---
+        # --- 5) Audit log to DynamoDB (best-effort) ---
         download_id = str(uuid.uuid4())
-        requested_by = _get_requester(event)
+        requested_by = email or username or "unknown"
         ip, ua = _get_ip_and_ua(event)
 
         history_item = {
@@ -163,12 +185,13 @@ def handler(event, context):
             "asAttachment": as_attachment,
             "downloadName": download_name or "",
             "ttlSeconds": TTL,
+            "userGroups": groups,
         }
-        # Best-effort logging; don't fail the request if logging fails
+
         try:
             history_table.put_item(Item=history_item)
         except Exception as log_err:
-            # Still return URL; print for CW logs
+            # Don't fail the request if logging fails; print to CloudWatch for diagnosis
             print("WARN: failed to write download history:", str(log_err))
 
         return _resp(200, {"url": url, "expiresIn": TTL})

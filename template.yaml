@@ -256,6 +256,35 @@ Resources:
             TableName: !Ref DownloadHistoryTable
         - AWSLambdaBasicExecutionRole
 
+  ########################################
+  # Lambda: delete file (DELETE /files/{fileId})
+  ########################################
+  DeleteFileFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/delete_file/
+      Handler: app.handler
+      Description: Delete a file (admin only) - removes S3 object + metadata
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref FilesBucket
+          FILES_TABLE_NAME: !Ref FilesTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /files/{fileId}
+            Method: DELETE
+      Policies:
+        # Need to read item (to get s3Key) and delete metadata
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FilesTable
+        # Delete the object from S3
+        - S3CrudPolicy:
+            BucketName: !Ref FilesBucket
+        - AWSLambdaBasicExecutionRole
+
 
 Outputs:
   ApiUrl:
